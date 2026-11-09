@@ -24,3 +24,12 @@ export interface Template {
   prompt: string;
   swatch: string;
 }
+
+export interface ProjectSummary {
+  id: string;
+  title: string;
+  brief: string;
+  createdAt: number;
+  updatedAt: number;
+  builds: number;
+}

@@ -25,6 +25,8 @@ interface ChatPanelProps {
   liveSteps: AgentStep[] | null;
   isGenerating: boolean;
   elapsedMs: number;
+  projectTitle: string | null;
+  hasSite: boolean;
   onSend: () => void;
 }
 
@@ -106,6 +108,8 @@ export function ChatPanel({
   liveSteps,
   isGenerating,
   elapsedMs,
+  projectTitle,
+  hasSite,
   onSend,
 }: ChatPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -125,13 +129,15 @@ export function ChatPanel({
     <section className="flex h-full min-w-0 flex-col bg-[#0b0b0d]">
       {/* Header */}
       <header className="flex h-14 shrink-0 items-center justify-between border-b border-white/[0.06] px-5">
-        <div className="flex items-center gap-2.5">
-          <h1 className="text-sm font-medium text-white">Untitled project</h1>
+        <div className="flex min-w-0 items-center gap-2.5">
+          <h1 className="max-w-[220px] truncate text-sm font-medium text-white sm:max-w-[320px]">
+            {projectTitle ?? "Untitled project"}
+          </h1>
           <Badge
             variant="outline"
-            className="border-amber-400/25 bg-amber-400/[0.06] px-1.5 py-0 text-[9px] font-medium text-amber-300"
+            className="shrink-0 border-amber-400/25 bg-amber-400/[0.06] px-1.5 py-0 text-[9px] font-medium text-amber-300"
           >
-            LIVE
+            {hasSite ? "REFINE" : "LIVE"}
           </Badge>
         </div>
         <p className="text-[11px] text-zinc-500">Chat</p>
@@ -213,7 +219,9 @@ export function ChatPanel({
               placeholder={
                 isGenerating
                   ? "Building… wait for this run to finish"
-                  : "Describe the site you want to build…"
+                  : hasSite
+                    ? "Describe a change to this page…"
+                    : "Describe the site you want to build…"
               }
               rows={2}
               disabled={isGenerating}
@@ -249,8 +257,9 @@ export function ChatPanel({
           </div>
           <p className="mt-2 flex items-center justify-center gap-1.5 text-[10px] text-zinc-600">
             <AlertTriangle className="size-3" />
-            First runs can take a few minutes. The site is written to
-            .atelier/sites.
+            {hasSite
+              ? "Changes edit the same index.html. The previous version is replaced."
+              : "First runs can take a few minutes. The site is written to .atelier/sites."}
           </p>
         </div>
       </div>

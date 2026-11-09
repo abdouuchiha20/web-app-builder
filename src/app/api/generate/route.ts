@@ -4,6 +4,7 @@ export const maxDuration = 600;
 
 interface GenerateBody {
   prompt?: unknown;
+  siteId?: unknown;
 }
 
 function errorMessage(error: unknown): string {
@@ -27,6 +28,7 @@ export async function POST(request: Request) {
   }
 
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+  const siteId = typeof body.siteId === "string" ? body.siteId.trim() : undefined;
 
   if (!prompt) {
     return Response.json({ error: "A prompt is required." }, { status: 400 });
@@ -59,7 +61,7 @@ export async function POST(request: Request) {
       };
 
       try {
-        const result = await generateSite(prompt, send, abortController.signal);
+        const result = await generateSite({ brief: prompt, siteId }, send, abortController.signal);
         send({ type: "result", ...result });
       } catch (error) {
         send({ type: "error", message: errorMessage(error) });

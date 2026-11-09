@@ -5,18 +5,27 @@ import { randomUUID } from "node:crypto";
 import { OpenCode } from "@opencode/client";
 import { Service } from "@opencode/client/service";
 
-const SITES_ROOT = path.join(process.cwd(), ".atelier", "sites");
+import {
+  SITES_ROOT,
+  isSafeSiteId,
+  readProjectHtml,
+  readProjectMeta,
+  writeProjectMeta,
+} from "@/lib/engine/projects";
+
 const GENERATION_TIMEOUT_MS = 10 * 60 * 1000;
 const POLL_MS = 2000;
 const TICK_MS = 5000;
 
 export type BuildStepId = "brief" | "build" | "preview";
+export type BuildMode = "create" | "refine";
 
 export type GenerateEvent =
   | { type: "step"; id: BuildStepId; status: "pending" | "active" | "done"; detail?: string }
   | { type: "tick"; elapsedMs: number }
   | {
       type: "result";
+      mode: BuildMode;
       siteId: string;
       html: string;
       title: string;
@@ -25,6 +34,7 @@ export type GenerateEvent =
   | { type: "error"; message: string };
 
 export interface GenerateResult {
+  mode: BuildMode;
   siteId: string;
   html: string;
   title: string;
@@ -88,6 +98,27 @@ function buildPrompt(brief: string): string {
   ].join("\n");
 }
 
+function refinePrompt(change: string): string {
+  return [
+    "You are editing an existing website. The complete site is in `index.html` in the current working directory.",
+    "",
+    "CHANGE REQUEST",
+    '"""',
+    change,
+    '"""',
+    "",
+    "RULES — follow this exactly:",
+    "1. Read `index.html` first, then apply the smallest set of edits that satisfies the request.",
+    "2. Keep everything else intact: the copy, palette, layout and motion that were not mentioned.",
+    "3. A value usually appears more than once: a visible list, a footer summary, and a JavaScript object that powers it. After editing, search the file for the old text or the old value and update EVERY copy, so the page never contradicts itself.",
+    "4. If the page has a shop, cart or prices, keep prices and product names consistent everywhere they appear.",
+    "5. Keep it ONE self-contained file: inline CSS in <style>, inline JavaScript in <script>, no build step, no local assets. Google Fonts and `https://picsum.photos/seed/<word>/1600/1000` only.",
+    "6. Keep it responsive at 390px, 768px and 1440px, with visible focus states and alt text.",
+    "7. No questions, no explanations, no shell commands, no package installs.",
+    "8. When the edits are complete, reply with exactly: DONE",
+  ].join("\n");
+}
+
 async function fileExists(target: string): Promise<boolean> {
   try {
     const info = await stat(target);
@@ -137,10 +168,33 @@ function extractHtmlFromText(text: string): string | null {
   return null;
 }
 
+function friendlyError(message: string): string {
+  const lower = message.toLowerCase();
+
+  if (
+    lower.includes("free usage limit") ||
+    lower.includes("freeusage") ||
+    lower.includes("429") ||
+    lower.includes("rate limit")
+  ) {
+    return (
+      "The free OpenCode model quota is used up for now. " +
+      "Wait for it to reset (the error said about 5 hours), or add your own provider key in OpenCode config. " +
+      "Your project and its files are untouched."
+    );
+  }
+
+  if (lower.includes("aborted") || lower.includes("cancelled")) {
+    return "The build was cancelled.";
+  }
+
+  return message;
+}
+
 function extractTitle(html: string): string {
   const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   const title = match?.[1]?.replace(/\s+/g, " ").trim();
-  return title || "Generated site";
+  return title || "Untitled site";
 }
 
 async function cancelSession(client: Client, sessionID: string) {
@@ -151,28 +205,63 @@ async function cancelSession(client: Client, sessionID: string) {
   }
 }
 
+interface GenerateInput {
+  brief: string;
+  siteId?: string;
+}
+
 export async function generateSite(
-  brief: string,
+  input: GenerateInput,
   onEvent: (event: GenerateEvent) => void,
   signal?: AbortSignal,
 ): Promise<GenerateResult> {
+  const { brief } = input;
   const started = Date.now();
-  const siteId = `${slugify(brief)}-${randomUUID().slice(0, 8)}`;
-  const directory = path.join(SITES_ROOT, siteId);
+  const mode: BuildMode = input.siteId ? "refine" : "create";
 
-  await mkdir(directory, { recursive: true });
+  let siteId: string;
+  let directory: string;
+  let previousHtml: string | null = null;
+
+  if (mode === "refine") {
+    siteId = input.siteId as string;
+
+    if (!isSafeSiteId(siteId)) {
+      throw new Error("That project id is not valid.");
+    }
+
+    previousHtml = await readProjectHtml(siteId);
+
+    if (!previousHtml) {
+      throw new Error(
+        "That project could not be found. It may have been deleted from .atelier/sites.",
+      );
+    }
+
+    directory = path.join(SITES_ROOT, siteId);
+  } else {
+    siteId = `${slugify(brief)}-${randomUUID().slice(0, 8)}`;
+    directory = path.join(SITES_ROOT, siteId);
+    await mkdir(directory, { recursive: true });
+  }
 
   onEvent({
     type: "step",
     id: "brief",
     status: "done",
-    detail: "Brief received. Building a complete first version.",
+    detail:
+      mode === "refine"
+        ? "Change received. Reading the current page."
+        : "Brief received. Building a complete first version.",
   });
   onEvent({
     type: "step",
     id: "build",
     status: "active",
-    detail: "Choosing direction, then writing the page as one self-contained file.",
+    detail:
+      mode === "refine"
+        ? "Applying your change to the existing page."
+        : "Choosing direction, then writing the page as one self-contained file.",
   });
 
   const client = await getClient();
@@ -182,69 +271,101 @@ export async function generateSite(
     title: brief.slice(0, 80),
   });
 
-  const promptMessage = await client.session.prompt({
-    sessionID: session.id,
-    text: buildPrompt(brief),
-  });
+  const prompts: string[] = [mode === "refine" ? refinePrompt(brief) : buildPrompt(brief)];
 
-  const promptTime = promptMessage.time?.created ?? Date.now();
-  const deadline = started + GENERATION_TIMEOUT_MS;
+  let html: string | null = null;
+  let idleOutcome: "succeeded" | "failed" | "interrupted" = "succeeded";
+  let idleError: { message?: string } | undefined;
 
-  let fileSeen = false;
-  let lastTick = 0;
-  let idle: { outcome: "succeeded" | "failed" | "interrupted"; error?: { message?: string } } | null =
-    null;
-
-  try {
-    while (Date.now() < deadline) {
-      if (signal?.aborted) {
-        throw new DOMException("Aborted", "AbortError");
-      }
-
-      if (!fileSeen) {
-        const html = await readSiteHtml(directory);
-        if (html) {
-          fileSeen = true;
-          onEvent({
-            type: "step",
-            id: "build",
-            status: "done",
-            detail: "The page is written. Finishing up.",
-          });
-        }
-      }
-
-      const messages = await client.message.list({
+  for (let attempt = 0; attempt < prompts.length; attempt += 1) {
+    const attemptStarted = Date.now();
+    let promptMessage;
+    try {
+      promptMessage = await client.session.prompt({
         sessionID: session.id,
-        order: "desc",
-        limit: 40,
+        text: prompts[attempt],
       });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(friendlyError(message));
+    }
 
-      const idleMessage = messages.data.find(
-        (message) => message.type === "idle" && message.time.created >= promptTime,
-      );
+    const actualPromptTime = promptMessage.time?.created ?? attemptStarted;
+    const deadline = Date.now() + GENERATION_TIMEOUT_MS;
 
-      if (idleMessage && idleMessage.type === "idle") {
-        idle = {
-          outcome: idleMessage.outcome,
-          error: idleMessage.error,
-        };
-        break;
+    let fileSeen = false;
+    let lastTick = 0;
+    let idle: {
+      outcome: "succeeded" | "failed" | "interrupted";
+      error?: { message?: string };
+    } | null = null;
+
+    try {
+      while (Date.now() < deadline) {
+        if (signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+
+        if (!fileSeen) {
+          const candidate = await readSiteHtml(directory);
+
+          if (candidate && candidate !== previousHtml) {
+            fileSeen = true;
+            onEvent({
+              type: "step",
+              id: "build",
+              status: "done",
+              detail:
+                mode === "refine"
+                  ? "The change is applied. Finishing up."
+                  : "The page is written. Finishing up.",
+            });
+          }
+        }
+
+        const messages = await client.message.list({
+          sessionID: session.id,
+          order: "desc",
+          limit: 40,
+        });
+
+        const idleMessage = messages.data.find(
+          (message) => message.type === "idle" && message.time.created >= actualPromptTime,
+        );
+
+        if (idleMessage && idleMessage.type === "idle") {
+          idle = {
+            outcome: idleMessage.outcome,
+            error: idleMessage.error,
+          };
+          break;
+        }
+
+        if (Date.now() - lastTick >= TICK_MS) {
+          lastTick = Date.now();
+          onEvent({ type: "tick", elapsedMs: Date.now() - started });
+        }
+
+        await sleep(POLL_MS);
+      }
+    } catch (error) {
+      await cancelSession(client, session.id);
+
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new Error("The build was cancelled.");
       }
 
-      if (Date.now() - lastTick >= TICK_MS) {
-        lastTick = Date.now();
-        onEvent({ type: "tick", elapsedMs: Date.now() - started });
-      }
-
-      await sleep(POLL_MS);
+      throw error;
     }
 
     if (!idle) {
       throw new Error("The build took longer than 10 minutes and was stopped.");
     }
 
-    let html = await readSiteHtml(directory);
+    idleOutcome = idle.outcome;
+    idleError = idle.error;
+
+    html = await readSiteHtml(directory);
 
     if (!html) {
       const messages = await client.message.list({
@@ -256,9 +377,7 @@ export async function generateSite(
       const assistantText = messages.data
         .flatMap((message) =>
           message.type === "assistant"
-            ? message.content
-                .filter((part) => part.type === "text")
-                .map((part) => part.text)
+            ? message.content.filter((part) => part.type === "text").map((part) => part.text)
             : [],
         )
         .join("\n");
@@ -266,45 +385,77 @@ export async function generateSite(
       html = extractHtmlFromText(assistantText);
     }
 
-    if (!html) {
-      const reason =
-        idle.outcome === "failed"
-          ? idle.error?.message
-            ? `The model stopped with an error: ${idle.error.message}`
-            : "The model stopped with an error before writing the page."
+    const unchanged = mode === "refine" && !!previousHtml && html === previousHtml;
+
+    if (unchanged && attempt === 0) {
+      prompts.push(
+        [
+          "You replied DONE but `index.html` is byte-for-byte identical to before. No edits were applied.",
+          "Re-read `index.html`, find the exact text or value the change request refers to, and edit it now.",
+          "Do not reply DONE until the file has actually changed.",
+          "",
+          "CHANGE REQUEST (repeat):",
+          '"""',
+          brief,
+          '"""',
+        ].join("\n"),
+      );
+      html = null;
+      continue;
+    }
+
+    break;
+  }
+
+  if (!html) {
+    const reason =
+      idleOutcome === "failed"
+        ? idleError?.message
+          ? `The model stopped with an error: ${friendlyError(idleError.message)}`
+          : "The model stopped with an error before writing the page."
+        : mode === "refine"
+          ? "The model finished twice without changing index.html. Make the request more specific, or name the exact element to change."
           : "The model finished without producing an index.html file.";
 
-      throw new Error(`${reason} Try again, or make the brief more specific.`);
-    }
-
-    const elapsedMs = Date.now() - started;
-
-    onEvent({
-      type: "step",
-      id: "build",
-      status: "done",
-      detail: "The page is written in one self-contained file.",
-    });
-    onEvent({
-      type: "step",
-      id: "preview",
-      status: "done",
-      detail: "Preview is live on the right.",
-    });
-
-    return {
-      siteId,
-      html,
-      title: extractTitle(html),
-      elapsedMs,
-    };
-  } catch (error) {
-    await cancelSession(client, session.id);
-
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("The build was cancelled.");
-    }
-
-    throw error;
+    throw new Error(`${reason} Try again, or make the brief more specific.`);
   }
+
+  const elapsedMs = Date.now() - started;
+  const title = extractTitle(html);
+
+  onEvent({
+    type: "step",
+    id: "build",
+    status: "done",
+    detail:
+      mode === "refine"
+        ? "The change is applied to the same file."
+        : "The page is written in one self-contained file.",
+  });
+  onEvent({
+    type: "step",
+    id: "preview",
+    status: "done",
+    detail: mode === "refine" ? "The preview now shows the new version." : "Preview is live on the right.",
+  });
+
+  const existingMeta = await readProjectMeta(siteId);
+  const priorBuilds = existingMeta?.builds ?? (previousHtml ? 1 : 0);
+
+  await writeProjectMeta({
+    id: siteId,
+    title,
+    brief: existingMeta?.brief || (mode === "create" ? brief : ""),
+    createdAt: existingMeta?.createdAt ?? started,
+    updatedAt: Date.now(),
+    builds: priorBuilds + 1,
+  });
+
+  return {
+    mode,
+    siteId,
+    html,
+    title,
+    elapsedMs,
+  };
 }
