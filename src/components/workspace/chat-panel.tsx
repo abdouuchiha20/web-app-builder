@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import {
+  AlertTriangle,
   ArrowUp,
   Check,
   Circle,
@@ -20,56 +21,12 @@ import { Textarea } from "@/components/ui/textarea";
 interface ChatPanelProps {
   prompt: string;
   onPromptChange: (value: string) => void;
+  messages: ChatMessage[];
+  liveSteps: AgentStep[] | null;
+  isGenerating: boolean;
+  elapsedMs: number;
+  onSend: () => void;
 }
-
-const exampleSteps: AgentStep[] = [
-  {
-    id: "brief",
-    title: "Reading the brief",
-    detail: "Locked the niche, the audience and the one job the page has to do.",
-    status: "done",
-  },
-  {
-    id: "direction",
-    title: "Choosing a design direction",
-    detail: "Editorial type, warm neutrals, restrained motion — not a template look.",
-    status: "done",
-  },
-  {
-    id: "layout",
-    title: "Building the layout",
-    detail: "Hero, product grid, cart drawer and checkout, section by section.",
-    status: "done",
-  },
-  {
-    id: "backend",
-    title: "Wiring the backend",
-    detail: "Product data, cart state and checkout plumbing ready to connect.",
-    status: "active",
-  },
-  {
-    id: "motion",
-    title: "Polishing motion",
-    detail: "Scroll reveals, hover states and page transitions.",
-    status: "pending",
-  },
-  {
-    id: "preview",
-    title: "Preview ready",
-    detail: "The full site appears in the preview panel on the right.",
-    status: "pending",
-  },
-];
-
-const initialMessages: ChatMessage[] = [
-  {
-    id: "welcome",
-    role: "assistant",
-    content:
-      "Ready when you are. Describe the site you want — or pick a template on the left. I'll build a complete first version, then we refine it together.",
-    steps: exampleSteps,
-  },
-];
 
 function StepIcon({ status }: { status: AgentStep["status"] }) {
   if (status === "done") {
@@ -79,6 +36,7 @@ function StepIcon({ status }: { status: AgentStep["status"] }) {
       </span>
     );
   }
+
   if (status === "active") {
     return (
       <span className="flex size-5 items-center justify-center rounded-full bg-amber-400/15 text-amber-300">
@@ -86,6 +44,7 @@ function StepIcon({ status }: { status: AgentStep["status"] }) {
       </span>
     );
   }
+
   return (
     <span className="flex size-5 items-center justify-center rounded-full text-zinc-600">
       <Circle className="size-2.5" />
@@ -93,13 +52,13 @@ function StepIcon({ status }: { status: AgentStep["status"] }) {
   );
 }
 
-function AgentSteps({ steps }: { steps: AgentStep[] }) {
+function AgentSteps({ steps, title }: { steps: AgentStep[]; title: string }) {
   return (
     <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
       <div className="mb-2.5 flex items-center gap-2">
         <Sparkles className="size-3.5 text-amber-300" />
         <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">
-          Example agent run
+          {title}
         </span>
       </div>
       <ol className="space-y-2.5">
@@ -131,29 +90,35 @@ function AgentSteps({ steps }: { steps: AgentStep[] }) {
   );
 }
 
-export function ChatPanel({ prompt, onPromptChange }: ChatPanelProps) {
-  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+function formatElapsed(ms: number) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  if (total < 60) return `${total}s`;
+
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+}
+
+export function ChatPanel({
+  prompt,
+  onPromptChange,
+  messages,
+  liveSteps,
+  isGenerating,
+  elapsedMs,
+  onSend,
+}: ChatPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages]);
+  }, [messages, liveSteps]);
+
+  const canSend = prompt.trim().length > 0 && !isGenerating;
 
   function send() {
-    const text = prompt.trim();
-    if (!text) return;
-
-    setMessages((current) => [
-      ...current,
-      { id: `user-${Date.now()}`, role: "user", content: text },
-      {
-        id: `assistant-${Date.now()}`,
-        role: "assistant",
-        content:
-          "Got it. The generation engine comes in the next phase — right now this is the Phase 1 workspace shell. Once OpenCode is wired in, this exact prompt becomes a real build.",
-      },
-    ]);
-    onPromptChange("");
+    if (!canSend) return;
+    onSend();
   }
 
   return (
@@ -166,7 +131,7 @@ export function ChatPanel({ prompt, onPromptChange }: ChatPanelProps) {
             variant="outline"
             className="border-amber-400/25 bg-amber-400/[0.06] px-1.5 py-0 text-[9px] font-medium text-amber-300"
           >
-            PHASE 1
+            LIVE
           </Badge>
         </div>
         <p className="text-[11px] text-zinc-500">Chat</p>
@@ -195,13 +160,39 @@ export function ChatPanel({ prompt, onPromptChange }: ChatPanelProps) {
                 <p className="mb-1 text-[11px] font-medium text-zinc-500">
                   {message.role === "assistant" ? "Atelier" : "You"}
                 </p>
-                <p className="text-[13.5px] leading-relaxed text-zinc-200">
+                <p className="whitespace-pre-wrap text-[13.5px] leading-relaxed text-zinc-200">
                   {message.content}
                 </p>
-                {message.steps && <AgentSteps steps={message.steps} />}
+                {message.steps && (
+                  <AgentSteps steps={message.steps} title="Build log" />
+                )}
               </div>
             </div>
           ))}
+
+          {/* Live run */}
+          {isGenerating && (
+            <div className="flex gap-3">
+              <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-amber-300 via-orange-400 to-rose-500 text-black">
+                <Sparkles className="size-3.5" strokeWidth={2.4} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="mb-1 flex items-center gap-2">
+                  <p className="text-[11px] font-medium text-zinc-500">Atelier</p>
+                  <span className="flex items-center gap-1 text-[10.5px] text-amber-300/90">
+                    <Loader2 className="size-3 animate-spin" />
+                    {formatElapsed(elapsedMs)}
+                  </span>
+                </div>
+                <p className="text-[13.5px] leading-relaxed text-zinc-300">
+                  Building your page. This usually takes one to three minutes on a
+                  free model.
+                </p>
+                {liveSteps && <AgentSteps steps={liveSteps} title="Build progress" />}
+              </div>
+            </div>
+          )}
+
           <div ref={bottomRef} />
         </div>
       </ScrollArea>
@@ -219,9 +210,14 @@ export function ChatPanel({ prompt, onPromptChange }: ChatPanelProps) {
                   send();
                 }
               }}
-              placeholder="Describe the site you want to build…"
+              placeholder={
+                isGenerating
+                  ? "Building… wait for this run to finish"
+                  : "Describe the site you want to build…"
+              }
               rows={2}
-              className="min-h-0 resize-none border-0 bg-transparent px-2 py-1.5 text-[13.5px] text-zinc-100 shadow-none placeholder:text-zinc-600 focus-visible:ring-0 dark:bg-transparent"
+              disabled={isGenerating}
+              className="min-h-0 resize-none border-0 bg-transparent px-2 py-1.5 text-[13.5px] text-zinc-100 shadow-none placeholder:text-zinc-600 focus-visible:ring-0 disabled:opacity-60 dark:bg-transparent"
             />
             <div className="flex items-center justify-between px-1 pb-0.5 pt-1">
               <div className="flex items-center gap-2">
@@ -230,7 +226,7 @@ export function ChatPanel({ prompt, onPromptChange }: ChatPanelProps) {
                   className="gap-1 border-white/[0.08] bg-white/[0.03] px-2 py-0.5 text-[10px] font-normal text-zinc-400"
                 >
                   <span className="size-1.5 rounded-full bg-emerald-400" />
-                  Free models
+                  Local engine
                 </Badge>
                 <span className="hidden text-[10px] text-zinc-600 sm:inline">
                   Enter to send · Shift + Enter for a new line
@@ -239,16 +235,22 @@ export function ChatPanel({ prompt, onPromptChange }: ChatPanelProps) {
               <Button
                 size="icon"
                 onClick={send}
-                disabled={!prompt.trim()}
+                disabled={!canSend}
                 className="size-8 rounded-xl bg-white text-zinc-900 hover:bg-zinc-200 disabled:bg-white/10 disabled:text-zinc-500"
                 aria-label="Send prompt"
               >
-                <ArrowUp className="size-4" strokeWidth={2.5} />
+                {isGenerating ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <ArrowUp className="size-4" strokeWidth={2.5} />
+                )}
               </Button>
             </div>
           </div>
-          <p className="mt-2 text-center text-[10px] text-zinc-600">
-            Phase 1 shell · engine wiring comes next
+          <p className="mt-2 flex items-center justify-center gap-1.5 text-[10px] text-zinc-600">
+            <AlertTriangle className="size-3" />
+            First runs can take a few minutes. The site is written to
+            .atelier/sites.
           </p>
         </div>
       </div>

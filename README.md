@@ -1,36 +1,58 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Atelier
 
-## Getting Started
+A personal, design-first web app builder. Describe a site in plain language and get a complete, self-contained page in the preview panel — built locally by OpenCode on free models.
 
-First, run the development server:
+## Status
+
+- **Phase 0–1** — Next.js 16 + Tailwind v4 + shadcn/ui scaffold, 3-pane workspace shell.
+- **Phase 2** — live generation engine wired end to end. **Working.**
+- Next: editing an existing build, project persistence, GitHub commits per build.
+
+## Run it
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open the port printed in the terminal (currently `http://localhost:3002`; port 3000 is used by another local app).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+The engine is the local OpenCode server. `@opencode/client`'s `Service.ensure()` starts it if needed and discovers the running instance, so there is nothing extra to launch.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## How a build works
 
-## Learn More
+1. You type a brief, or pick a template in the left sidebar.
+2. `POST /api/generate` creates a session in a fresh folder under `.atelier/sites/<slug>-<id>` using the **`atelier-builder`** agent (`.opencode/agents/atelier-builder.md`).
+3. The agent writes one `index.html`: inline CSS and JS, Google Fonts, `picsum.photos` images, real copy, responsive layout, scroll motion.
+4. The route streams NDJSON events (`step`, `tick`, `result`, `error`) while it polls the session. No 300-second HTTP timeout.
+5. The UI renders the returned HTML in a sandboxed iframe and offers download, open-in-tab, responsive preview and fullscreen.
 
-To learn more about Next.js, take a look at the following resources:
+Generation usually takes 1–3 minutes on a free model. The timeout is 10 minutes.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## The agent
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+`.opencode/agents/atelier-builder.md` is the heart of quality control:
 
-## Deploy on Vercel
+- **No skills, no web search, no shell** — skills were eating the output budget and research loops wasted minutes.
+- Pinned to a free model with a 32k output window.
+- A strict output contract: one file, real copy, high design bar.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Tune that file to change how every build behaves.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Layout
+
+```
+src/app/api/generate/route.ts     streaming build endpoint
+src/lib/engine/opencode.ts        engine: sessions, polling, HTML extraction
+src/components/workspace/         3-pane UI (sidebar, chat, preview)
+.opencode/agents/                 atelier-builder agent
+.atelier/sites/                   generated sites (gitignored)
+scripts/                          engine + API probes used during development
+docs/                             design notes
+```
+
+## Notes
+
+- `.atelier/` and `workspace/` are gitignored: generated sites stay local.
+- Free models only. A slower model is normal; the build log shows real elapsed time.
+- The code view, download and fullscreen act on the current generated file.
